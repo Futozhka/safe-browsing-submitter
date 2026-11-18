@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Массовая отправка отчётов</title>
+<style>
+  :root { --line:#d9dee7; --accent:#2563eb; --ok:#16803c; --err:#c02626; }
+  * { box-sizing:border-box; }
+  body { font-family:system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background:#f4f6fa; margin:0; color:#1c2733; }
+  main { max-width:880px; margin:0 auto; padding:24px 16px 64px; }
+  header { background:#fff; border-bottom:1px solid var(--line); }
+  header .inner { max-width:880px; margin:0 auto; padding:20px 16px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .muted { color:#61708a; font-size:14px; }
+  form { background:#fff; border:1px solid var(--line); border-radius:10px; padding:20px; }
+  label { display:block; font-size:13px; font-weight:600; margin:14px 0 6px; }
+  label:first-child { margin-top:0; }
+  input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line);
+        border-radius:6px; font:inherit; background:#fff; }
+  textarea { resize:vertical; font-family:ui-monospace, Menlo, Consolas, monospace; }
+  button { background:var(--accent); border:none; color:#fff; font-weight:600;
+           padding:10px 22px; border-radius:6px; cursor:pointer; margin-top:18px; }
+  button:disabled { background:#9db8e8; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; background:#fff;
+          border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); font-size:14px; }
+  th { background:#eef2f8; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  td.mono { font-family:ui-monospace, Menlo, Consolas, monospace; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+  .b-pending  { background:#e8edf5; color:#44536b; }
+  .b-progress { background:#fdf3d7; color:#8a6d1a; }
+  .b-done     { background:#e2f4e7; color:var(--ok); }
+  .b-error    { background:#fae3e3; color:var(--err); }
+  .retry { background:#fff; color:var(--accent); border:1px solid var(--accent);
+           padding:4px 10px; margin:0; font-size:12px; }
+  .errtext { color:var(--err); font-size:13px; }
+  a.shot { font-size:12px; }
+  #results { margin-top:24px; }
+</style>
+</head>
+<body>
+<header><div class="inner">
+  <h1>Массовая отправка отчётов в форму жалоб</h1>
+  <div class="muted">Каждая строка отправляется отдельным сабмитом; капча решается через 2captcha автоматически.</div>
+</div></header>
+<main>
+  <form id="main-form">
+    <label for="submission_type">Submission Type</label>
+    <select id="submission_type" name="submission_type">
+      <option>Domain</option><option>IP</option><option>URL</option>
+    </select>
+
+    <label for="targets">Цели (по одной на строку)</label>
+    <textarea id="targets" rows="6" placeholder="example.com&#10;198.51.100.7&#10;https://bad.example/page" required></textarea>
+
+    <label for="threat_type">Threat Type</label>
+    <input id="threat_type" list="threat_list" required>
+    <datalist id="threat_list">
+      <option>Malware</option><option>Phishing</option><option>Unwanted Software</option>
+    </datalist>
+
+    <label for="reason">Reason</label>
+    <input id="reason" required placeholder="Например: Site contains malware">
+
+    <label for="file">Файл-вложение (jpg / jpeg / png / pdf, до 2 МБ)</label>
+    <input type="file" id="file" accept=".jpg,.jpeg,.png,.pdf" required>
+
+    <button type="submit" id="run-btn">Отправить</button>
+  </form>
+
+  <section id="results" hidden>
+    <h2>Результаты</h2>
+    <table>
+      <thead><tr><th>Цель</th><th>Статус</th><th>Код подтверждения</th><th>Ошибка</th><th></th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+let jobId = null, pollTimer = null;
+
+$("#main-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fileInput = $("#file");
+  const f = fileInput.files[0];
+  if (f && f.size > 2 * 1024 * 1024) { alert("Файл больше 2 МБ"); return; }
+
+  const fd = new FormData();
+  fd.append("submission_type", $("#submission_type").value);
+  fd.append("targets", $("#targets").value);
+  fd.append("threat_type", $("#threat_type").value);
+  fd.append("reason", $("#reason").value);
+  if (f) fd.append("file", f);
+
+  $("#run-btn").disabled = true;
+  $("#run-btn").textContent = "Отправка…";
+  try {
+    const r = await fetch("/api/run", { method: "POST", body: fd });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    jobId = (await r.json()).job_id;
+    $("#results").hidden = false;
+    startPolling();
+  } catch (err) {
+    alert("Не удалось запустить отправку: " + err.message);
+    $("#run-btn").disabled = false;
+    $("#run-btn").textContent = "Отправить";
+  }
+});
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(poll, 2000);
+  poll();
+}
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+async function poll() {
+  const r = await fetch(`/api/job/${jobId}`);
+  const job = await r.json();
+  render(job.items);
+  if (job.finished) {
+    stopPolling();
+    $("#run-btn").disabled = false;
+    $("#run-btn").textContent = "Отправить";
+  }
+}
+
+function render(items) {
+  $("#tbody").innerHTML = items.map((it) => {
+    let badge, extra = "", action = "";
+    if (it.status === "pending")    badge = `<span class="badge b-pending">в очереди</span>`;
+    if (it.status === "in_progress") badge = `<span class="badge b-progress">отправляется…</span>`;
+    if (it.status === "done")        { badge = `<span class="badge b-done">отправлено</span>`; extra = it.code || ""; }
+    if (it.status === "error") {
+      badge = `<span class="badge b-error">ошибка</span>`;
+      const shot = `/runs/${jobId}/error_${it.index}_${it.attempt}.png`;
+      extra = `<span class="errtext">${escapeHtml(it.error || "")}</span> <a class="shot" href="${shot}" target="_blank">[скриншот]</a>`;
+      action = `<button class="retry" onclick="retry(${it.index})">Повторить</button>`;
+    }
+    return `<tr>
+      <td class="mono">${escapeHtml(it.target)}</td>
+      <td>${badge}</td>
+      <td class="mono">${it.code ? escapeHtml(it.code) : ""}</td>
+      <td>${extra}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function retry(index) {
+  const r = await fetch("/api/retry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId, indexes: [index] }),
+  });
+  if (r.ok) startPolling();
+  else alert("Не удалось перезапустить строку: " + (await r.json()).detail);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+</script>
+</body>
+</html>
